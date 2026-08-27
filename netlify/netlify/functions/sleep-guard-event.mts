@@ -107,6 +107,23 @@ function bearerToken(request: Request): string | null {
   return header.startsWith("Bearer ") ? header.slice(7) : null;
 }
 
+function authorizationDiagnostic(request: Request, expectedToken: string | undefined): Response {
+  const header = request.headers.get("authorization") ?? "";
+  if (!expectedToken) {
+    return json(200, { ok: false, stage: "server_token_missing" });
+  }
+  if (!header) {
+    return json(200, { ok: false, stage: "authorization_header_missing" });
+  }
+  if (!header.startsWith("Bearer ")) {
+    return json(200, { ok: false, stage: "bearer_prefix_missing" });
+  }
+  if (header.slice(7) !== expectedToken) {
+    return json(200, { ok: false, stage: "token_mismatch" });
+  }
+  return json(200, { ok: true, stage: "authorization_ok" });
+}
+
 function cleanText(value: unknown, maxLength: number): string | null {
   if (typeof value !== "string") return null;
   const cleaned = value.trim().replace(/[\r\n\t]+/g, " ").slice(0, maxLength);
@@ -280,6 +297,9 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   if (request.method !== "POST") return json(405, { ok: false, error: "method_not_allowed" });
 
   const expectedToken = Netlify.env.get("SLEEP_GUARD_SHORTCUT_TOKEN");
+  if (new URL(request.url).searchParams.get("diagnostic") === "1") {
+    return authorizationDiagnostic(request, expectedToken);
+  }
   if (!expectedToken || bearerToken(request) !== expectedToken) {
     return json(401, { ok: false, error: "unauthorized" });
   }
