@@ -102,6 +102,20 @@ function json(status: number, body: Record<string, unknown>): Response {
   });
 }
 
+async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("operation_timeout")), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function bearerToken(request: Request): string | null {
   const header = request.headers.get("authorization") ?? "";
   return header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -318,7 +332,7 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   let transition: Transition;
   let storageWarning: "state_update_failed" | "event_storage_failed" | null = null;
   try {
-    transition = await dependencies.transitionState(payload, receivedAt);
+    transition = await bounded(dependencies.transitionState(payload, receivedAt), 1_500);
   } catch {
     // The shortcut must still continue to its lock-screen action if the
     // optional durable state service has a transient outage.
@@ -354,7 +368,7 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   };
 
   try {
-    await dependencies.persistEvent(storedEvent);
+    await bounded(dependencies.persistEvent(storedEvent), 1_000);
   } catch {
     console.error("sleep-guard event storage failed");
     storageWarning = "event_storage_failed";
