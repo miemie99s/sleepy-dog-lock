@@ -316,10 +316,25 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
 
   const receivedAt = new Date().toISOString();
   let transition: Transition;
+  let storageWarning: "state_update_failed" | "event_storage_failed" | null = null;
   try {
     transition = await dependencies.transitionState(payload, receivedAt);
   } catch {
-    return json(503, { ok: false, error: "state_update_failed" });
+    // The shortcut must still continue to its lock-screen action if the
+    // optional durable state service has a transient outage.
+    console.error("sleep-guard state update failed");
+    return json(200, {
+      ok: true,
+      event,
+      active: false,
+      attempts: 0,
+      stage: "inactive",
+      ignored: true,
+      auto_started: false,
+      notification_sent: false,
+      storage_warning: "state_update_failed",
+      received_at: receivedAt,
+    });
   }
 
   const appName = cleanText(payload.app_name, 40);
@@ -341,7 +356,8 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   try {
     await dependencies.persistEvent(storedEvent);
   } catch {
-    return json(503, { ok: false, error: "event_storage_failed" });
+    console.error("sleep-guard event storage failed");
+    storageWarning = "event_storage_failed";
   }
 
   const copy = barkCopy(event, transition, appName);
@@ -404,6 +420,7 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
     auto_started: transition.auto_started,
     notification_sent: notificationSent,
     ...(notificationError ? { notification_error: notificationError } : {}),
+    ...(storageWarning ? { storage_warning: storageWarning } : {}),
     event_id: storedEvent.id,
     session_id: transition.state.session_id,
     received_at: receivedAt,
