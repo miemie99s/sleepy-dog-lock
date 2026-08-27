@@ -386,7 +386,8 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
             level: copy.level,
             icon: barkIcon,
           }),
-          signal: AbortSignal.timeout(8_000),
+          // Keep the iPhone shortcut responsive even when Bark is slow.
+          signal: AbortSignal.timeout(2_000),
         });
       } catch (error) {
         console.error("sleep-guard Bark request failed", {
