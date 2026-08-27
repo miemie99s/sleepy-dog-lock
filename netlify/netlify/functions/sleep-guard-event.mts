@@ -345,36 +345,52 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   }
 
   const copy = barkCopy(event, transition, appName);
+  let notificationSent = false;
+  let notificationError: "bark_not_configured" | "bark_failed" | null = null;
   if (copy) {
-    const barkKey = Netlify.env.get("BARK_DEVICE_KEY");
-    const barkOrigin = Netlify.env.get("BARK_API_ORIGIN") ?? "https://api.day.app";
+    // Keys copied from a mobile app can accidentally include surrounding whitespace.
+    const barkKey = Netlify.env.get("BARK_DEVICE_KEY")?.trim();
+    const barkOrigin = Netlify.env.get("BARK_API_ORIGIN")?.trim() || "https://api.day.app";
     const barkIcon = Netlify.env.get("BARK_ICON_URL")
       ?? new URL("/assets/c-avatar-v4.png", request.url).href;
-    if (!barkKey) return json(503, { ok: false, error: "bark_not_configured" });
-
-    const url = new URL(`${barkOrigin.replace(/\/$/, "")}/push`);
-    let barkResponse: Response;
-    try {
-      barkResponse = await dependencies.sendBark(url, {
-        method: "POST",
-        headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          device_key: barkKey,
-          title: copy.title,
-          body: copy.body,
-          group: "sleep-guard",
-          level: copy.level,
-          icon: barkIcon,
-        }),
-        signal: AbortSignal.timeout(8_000),
-      });
-    } catch {
-      return json(502, { ok: false, error: "bark_failed" });
-    }
-    if (!barkResponse.ok) return json(502, { ok: false, error: "bark_failed" });
-    const barkPayload = await barkResponse.clone().json().catch(() => ({})) as { code?: number };
-    if (barkPayload.code !== undefined && barkPayload.code !== 200) {
-      return json(502, { ok: false, error: "bark_failed" });
+    if (!barkKey) {
+      notificationError = "bark_not_configured";
+    } else {
+      const url = new URL(`${barkOrigin.replace(/\/$/, "")}/push`);
+      let barkResponse: Response | null = null;
+      try {
+        barkResponse = await dependencies.sendBark(url, {
+          method: "POST",
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({
+            device_key: barkKey,
+            title: copy.title,
+            body: copy.body,
+            group: "sleep-guard",
+            level: copy.level,
+            icon: barkIcon,
+          }),
+          signal: AbortSignal.timeout(8_000),
+        });
+      } catch (error) {
+        console.error("sleep-guard Bark request failed", {
+          name: error instanceof Error ? error.name : "unknown",
+          message: error instanceof Error ? error.message : "unknown",
+        });
+        notificationError = "bark_failed";
+      }
+      if (barkResponse) {
+        const barkPayload = await barkResponse.clone().json().catch(() => ({})) as { code?: number };
+        if (!barkResponse.ok || (barkPayload.code !== undefined && barkPayload.code !== 200)) {
+          console.error("sleep-guard Bark rejected push", {
+            status: barkResponse.status,
+            code: barkPayload.code ?? null,
+          });
+          notificationError = "bark_failed";
+        } else {
+          notificationSent = true;
+        }
+      }
     }
   }
 
@@ -386,6 +402,8 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
     stage: transition.stage,
     ignored: transition.ignored,
     auto_started: transition.auto_started,
+    notification_sent: notificationSent,
+    ...(notificationError ? { notification_error: notificationError } : {}),
     event_id: storedEvent.id,
     session_id: transition.state.session_id,
     received_at: receivedAt,
