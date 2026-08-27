@@ -442,15 +442,57 @@ export async function handle(request: Request, dependencies: Dependencies): Prom
   });
 }
 
-export default async (request: Request): Promise<Response> => {
+type FunctionContext = {
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
+
+export default async (request: Request, context: FunctionContext = {}): Promise<Response> => {
   const store = getStore({ name: "sleep-guard-events", consistency: "strong" });
-  return handle(request, {
+  const dependencies: Dependencies = {
     transitionState: (payload, receivedAt) => mutateState(store, payload, receivedAt),
     persistEvent: async (event) => {
       const datePrefix = event.received_at.slice(0, 10);
       await store.setJSON(`events/${datePrefix}/${event.received_at}-${event.id}`, event);
     },
     sendBark: fetch,
+  };
+
+  // Netlify's waitUntil lets the iPhone receive an acknowledgement before
+  // durable storage or Bark has to finish. The old synchronous path made
+  // Shortcuts report a generic network interruption whenever either service
+  // was slow, even though the request had already reached this function.
+  if (!context.waitUntil) return handle(request, dependencies);
+  if (request.method !== "POST") return handle(request, dependencies);
+
+  const expectedToken = Netlify.env.get("SLEEP_GUARD_SHORTCUT_TOKEN");
+  if (new URL(request.url).searchParams.get("diagnostic") === "1") {
+    return authorizationDiagnostic(request, expectedToken);
+  }
+  if (!expectedToken || bearerToken(request) !== expectedToken) {
+    return json(401, { ok: false, error: "unauthorized" });
+  }
+
+  let payload: Payload;
+  try {
+    payload = await request.clone().json() as Payload;
+  } catch {
+    return json(400, { ok: false, error: "invalid_json" });
+  }
+  const event = eventName(payload);
+  if (!event) return json(422, { ok: false, error: "invalid_event" });
+
+  const background = handle(request, dependencies).catch((error) => {
+    console.error("sleep-guard background processing failed", {
+      name: error instanceof Error ? error.name : "unknown",
+    });
+  });
+  context.waitUntil(background);
+  return json(200, {
+    ok: true,
+    accepted: true,
+    event,
+    stage: "accepted",
+    notification_sent: false,
   });
 };
 
